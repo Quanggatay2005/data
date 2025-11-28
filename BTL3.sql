@@ -527,6 +527,38 @@ values (6, 1, '2023-10-02'), -- SV An nhan chung chi C++
        (10, 6, '2023-10-7'); -- giang nhan chung chi ai
 
 DELIMITER //
+DROP FUNCTION IF EXISTS f_ClassifyStudent //
+CREATE FUNCTION f_ClassifyStudent(p_student_id INT) 
+RETURNS VARCHAR(50)
+DETERMINISTIC
+READS SQL DATA
+BEGIN
+    DECLARE v_gpa DECIMAL(5, 2);
+    DECLARE v_classification VARCHAR(50);
+    
+    -- 1. Gọi lại hàm tính GPA đã có (hoặc tính trực tiếp)
+    SELECT AVG(actual_score) INTO v_gpa
+    FROM TEST_RESULTS
+    WHERE student_id = p_student_id;
+    
+    -- 2. Sử dụng IF / ELSEIF để phân loại
+    IF v_gpa IS NULL THEN
+        SET v_classification = 'Chưa có điểm';
+    ELSEIF v_gpa >= 9.0 THEN
+        SET v_classification = 'Xuất Sắc (Excellent)';
+    ELSEIF v_gpa >= 8.0 THEN
+        SET v_classification = 'Giỏi (Good)';
+    ELSEIF v_gpa >= 6.5 THEN
+        SET v_classification = 'Khá (Fair)';
+    ELSEIF v_gpa >= 5.0 THEN
+        SET v_classification = 'Trung Bình (Average)';
+    ELSE
+        SET v_classification = 'Yếu (Weak)';
+    END IF;
+    
+    RETURN v_classification;
+END //
+
 -- 1. Hàm tính điểm trung bình (GPA) của sinh viên dựa trên kết quả thi
 DROP FUNCTION IF EXISTS f_CalculateGPA //
 CREATE FUNCTION f_CalculateGPA(p_student_id INT) 
@@ -570,6 +602,82 @@ BEGIN
 END //
 
 
+DROP PROCEDURE IF EXISTS sp_ReportHighRevenueInstructors //
+CREATE PROCEDURE sp_ReportHighRevenueInstructors(
+    IN p_min_revenue DECIMAL(15, 2) -- Tham số lọc doanh thu tối thiểu
+)
+BEGIN
+    -- 1. Kiểm tra tham số đầu vào (Validation)
+    IF p_min_revenue < 0 THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Lỗi: Mức doanh thu tối thiểu không được là số âm!';
+    ELSE
+        -- 2. Truy vấn phức tạp với GROUP BY và HAVING
+        SELECT 
+            u.user_id,
+            CONCAT(u.last_name, ' ', u.first_name) AS InstructorName,
+            i.teaching_field,
+            COUNT(t.transaction_id) AS TotalTransactions,
+            SUM(t.price) AS TotalRevenue
+        FROM INSTRUCTORS i
+        JOIN USERS u ON i.instructor_id = u.user_id
+        JOIN TRANSACTIONS t ON i.instructor_id = t.instructor_id
+        WHERE t.payment_status = 'completed' -- Chỉ lấy giao dịch thành công
+        GROUP BY i.instructor_id, u.last_name, u.first_name, i.teaching_field
+        HAVING TotalRevenue >= p_min_revenue -- Chỉ hiện người có doanh thu >= mức nhập vào
+        ORDER BY TotalRevenue DESC; -- Sắp xếp từ cao xuống thấp
+    END IF;
+END //
+
+DROP PROCEDURE IF EXISTS sp_AutoIssueCertificates //
+
+CREATE PROCEDURE sp_AutoIssueCertificates(
+    OUT p_count_issued INT -- Trả về số lượng chứng chỉ vừa cấp mới
+)
+BEGIN
+    -- Khai báo biến để lưu dữ liệu khi duyệt vòng lặp
+    DECLARE done INT DEFAULT FALSE;
+    DECLARE v_student_id INT;
+    DECLARE v_course_id INT;
+    
+    -- Khai báo CURSOR (Con trỏ) để lấy danh sách các sinh viên đã hoàn thành khóa học
+    DECLARE cur_completed_students CURSOR FOR 
+        SELECT student_id, course_id 
+        FROM ENROLLMENTS 
+        WHERE completion_status = 1;
+        
+    -- Khai báo handler để nhận biết khi nào hết dữ liệu (kết thúc vòng lặp)
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+
+    SET p_count_issued = 0;
+
+    -- Bắt đầu mở con trỏ
+    OPEN cur_completed_students;
+
+    -- Bắt đầu vòng lặp (Tương đương FOR / WHILE)
+    read_loop: LOOP
+        -- Lấy từng dòng dữ liệu gán vào biến
+        FETCH cur_completed_students INTO v_student_id, v_course_id;
+
+        -- Nếu hết dữ liệu thì thoát vòng lặp
+        IF done THEN
+            LEAVE read_loop;
+        END IF;
+
+        -- LOGIC KIỂM TRA: Nếu chưa có chứng chỉ thì cấp mới
+        IF NOT EXISTS (SELECT 1 FROM CERTIFICATES WHERE student_id = v_student_id AND course_id = v_course_id) THEN
+            INSERT INTO CERTIFICATES (student_id, course_id, issued_date)
+            VALUES (v_student_id, v_course_id, CURRENT_DATE());
+            
+            -- Tăng biến đếm
+            SET p_count_issued = p_count_issued + 1;
+        END IF;
+        
+    END LOOP;
+
+    -- Đóng con trỏ
+    CLOSE cur_completed_students;
+END //
 -- 3. Thủ tục đăng ký khóa học (có kiểm tra điều kiện)
 DROP PROCEDURE IF EXISTS sp_RegisterCourse //
 CREATE PROCEDURE sp_RegisterCourse(
@@ -665,6 +773,27 @@ BEGIN
     IF NEW.actual_score > v_max_score THEN
         SIGNAL SQLSTATE '45000'
         SET MESSAGE_TEXT = 'Lỗi: Điểm thực tế không được lớn hơn điểm tối đa của bài kiểm tra!';
+    END IF;
+END //
+
+DROP TRIGGER IF EXISTS trg_ValidatePaymentAmount //
+
+CREATE TRIGGER trg_ValidatePaymentAmount
+BEFORE INSERT ON TRANSACTIONS
+FOR EACH ROW
+BEGIN
+    DECLARE v_course_price DECIMAL(10, 2);
+    
+    -- Lấy giá gốc của khóa học
+    SELECT price INTO v_course_price
+    FROM COURSES
+    WHERE course_id = NEW.course_id;
+    
+    -- Kiểm tra: Nếu số tiền trả (NEW.price) thấp hơn giá khóa học -> Báo lỗi
+    -- (Trừ trường hợp được hoàn tiền 'refunded' thì không check)
+    IF NEW.payment_status != 'refunded' AND NEW.price < v_course_price THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Lỗi: Số tiền thanh toán không được thấp hơn giá khóa học!';
     END IF;
 END //
 

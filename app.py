@@ -4,7 +4,7 @@ import mysql.connector
 
 # --- CẤU HÌNH KẾT NỐI (Đã đổi sang BTL3) ---
 DB_CONFIG = {
-    'host': '127.0.0.1',
+    'host': '127.0.0.2',
     'database': 'BTL3', 
     'port': 3306
 }

@@ -13,5 +13,11 @@
 - Mở MySQL Workbench, kết nối tài khoản root. 
 - Mở file BTL3.sql
 - Nhấn nút tia sét. Dòng cuối báo "CAI DAT THANH CONG..." là thành công
+### 2.2 Chạy và cấu hình
 - python app.py 
 - Đăng nhập bằng sManager , pass là 123456. 
+- Test các chức năng CRUD,...
+
+## Một số lưu ý
+- Phần cấu hình mysql workbench, ae để ý cái cổng 'host' trong file app.py. Thường thì khi tạo 1 db mới, cổng đó sẽ là 127.0.0.1. Cấu hình lại vào app.py hoặc vào edit connections -> hostname. 
+
